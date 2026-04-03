@@ -10,8 +10,8 @@ st.set_page_config(page_title="Pontaj Allied Engineers", page_icon="🏗️", la
 # ============================================================
 @st.cache_resource
 def get_supabase():
-    url = st.secrets["supabase"]["url"]
-    key = st.secrets["supabase"]["key"]
+    url = "https://rhvaumovrmgljlhjnscl.supabase.co"
+    key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJodmF1bW92cm1nbGpsaGpuc2NsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUyNDE5MTMsImV4cCI6MjA5MDgxNzkxM30.xXnXljiRES2AdrnwJKv4WOUwtQZGrBZwG7aKVLPtVNA"
     return create_client(url, key)
 
 supabase = get_supabase()
