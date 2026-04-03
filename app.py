@@ -1,16 +1,20 @@
 import streamlit as st
 import pandas as pd
-import json
 from datetime import datetime, date, timedelta
-from io import StringIO
+from supabase import create_client
 
 st.set_page_config(page_title="Pontaj Allied Engineers", page_icon="🏗️", layout="wide")
 
 # ============================================================
-# STORAGE KEYS
+# SUPABASE CONNECTION
 # ============================================================
-KEY_PONTAJ = "pontaj_data_v1"
-KEY_CONFIG = "pontaj_config_v1"
+@st.cache_resource
+def get_supabase():
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
+
+supabase = get_supabase()
 
 # ============================================================
 # SARBATORI LEGALE ROMANIA 2026
@@ -80,40 +84,49 @@ CONFIG_DEFAULT = {
     ]
 }
 
-COLS = ["timestamp", "coleg", "saptamana", "data_zi", "proiect", "faza", "subfaza", "ore", "comentarii"]
-
 # ============================================================
-# STORAGE FUNCTIONS
+# STORAGE FUNCTIONS - SUPABASE
 # ============================================================
 def incarca_pontaj():
     try:
-        result = st.connection("storage", type="sql")
-    except:
-        pass
-    
-    if KEY_PONTAJ not in st.session_state:
-        st.session_state[KEY_PONTAJ] = []
-    
-    rows = st.session_state[KEY_PONTAJ]
-    if not rows:
-        return pd.DataFrame(columns=COLS)
-    return pd.DataFrame(rows, columns=COLS)
+        result = supabase.table("pontaj").select("*").execute()
+        if result.data:
+            df = pd.DataFrame(result.data)
+            return df
+        return pd.DataFrame(columns=["id","data","angajat","proiect","faza","ore","observatii","created_at","coleg","saptamana","data_zi","subfaza","comentarii","timestamp"])
+    except Exception as e:
+        st.error(f"Eroare la încărcarea datelor: {e}")
+        return pd.DataFrame()
 
 def salveaza_inregistrare(inreg):
-    if KEY_PONTAJ not in st.session_state:
-        st.session_state[KEY_PONTAJ] = []
-    st.session_state[KEY_PONTAJ].append([
-        inreg.get(c, "") for c in COLS
-    ])
-    return True
+    try:
+        data = {
+            "data": inreg.get("data_zi"),
+            "angajat": inreg.get("coleg"),
+            "proiect": inreg.get("proiect"),
+            "faza": inreg.get("faza"),
+            "ore": float(inreg.get("ore", 0)),
+            "observatii": inreg.get("comentarii", ""),
+            "coleg": inreg.get("coleg"),
+            "saptamana": inreg.get("saptamana"),
+            "data_zi": inreg.get("data_zi"),
+            "subfaza": inreg.get("subfaza", ""),
+            "comentarii": inreg.get("comentarii", ""),
+            "timestamp": inreg.get("timestamp"),
+        }
+        supabase.table("pontaj").insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Eroare la salvare: {e}")
+        return False
 
 def incarca_config():
-    if KEY_CONFIG not in st.session_state:
-        st.session_state[KEY_CONFIG] = CONFIG_DEFAULT.copy()
-    return st.session_state[KEY_CONFIG]
+    if "pontaj_config_v1" not in st.session_state:
+        st.session_state["pontaj_config_v1"] = CONFIG_DEFAULT.copy()
+    return st.session_state["pontaj_config_v1"]
 
 def salveaza_config(config):
-    st.session_state[KEY_CONFIG] = config
+    st.session_state["pontaj_config_v1"] = config
     return True
 
 # ============================================================
@@ -218,8 +231,9 @@ if pagina == "📝 Introducere ore":
                     "proiect": proiect, "faza": faza, "subfaza": subfaza,
                     "ore": ore, "comentarii": comentarii
                 }
-                salveaza_inregistrare(inreg)
-                st.success(f"✅ Salvat! {ore}h pe {proiect} — {faza}")
+                if salveaza_inregistrare(inreg):
+                    st.success(f"✅ Salvat! {ore}h pe {proiect} — {faza}")
+                    st.rerun()
 
         st.markdown("---")
         st.subheader(f"Intrările tale din {sapt_label.split('—')[0].strip()}")
@@ -328,7 +342,7 @@ elif pagina == "⚙️ Administrare":
     st.subheader("🗃️ Export date")
     df = incarca_pontaj()
     if len(df) > 0:
-        st.write(f"Total înregistrări în sesiunea curentă: **{len(df)}**")
+        st.write(f"Total înregistrări: **{len(df)}**")
         st.dataframe(df, use_container_width=True)
         csv = df.to_csv(index=False, encoding="utf-8")
         st.download_button("⬇️ Descarcă toate datele CSV", data=csv,
