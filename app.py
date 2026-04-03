@@ -1,24 +1,16 @@
 import streamlit as st
 import pandas as pd
 import json
-import base64
-import requests
 from datetime import datetime, date, timedelta
+from io import StringIO
 
 st.set_page_config(page_title="Pontaj Allied Engineers", page_icon="🏗️", layout="wide")
 
 # ============================================================
-# GITHUB CONFIG
+# STORAGE KEYS
 # ============================================================
-GITHUB_TOKEN = st.secrets["github"]["token"]
-GITHUB_REPO = "lidiamarc/pontaj-allied"
-FILE_PONTAJ = "data/pontaj.csv"
-FILE_CONFIG = "data/config.json"
-
-HEADERS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github.v3+json"
-}
+KEY_PONTAJ = "pontaj_data_v1"
+KEY_CONFIG = "pontaj_config_v1"
 
 # ============================================================
 # SARBATORI LEGALE ROMANIA 2026
@@ -88,70 +80,41 @@ CONFIG_DEFAULT = {
     ]
 }
 
-# ============================================================
-# GITHUB FILE OPERATIONS
-# ============================================================
-def github_get_file(path):
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
-    r = requests.get(url, headers=HEADERS)
-    if r.status_code == 200:
-        data = r.json()
-        content = base64.b64decode(data["content"]).decode("utf-8")
-        return content, data["sha"]
-    return None, None
+COLS = ["timestamp", "coleg", "saptamana", "data_zi", "proiect", "faza", "subfaza", "ore", "comentarii"]
 
-def github_put_file(path, content, sha=None, message="update data"):
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
-    encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
-    payload = {"message": message, "content": encoded}
-    if sha:
-        payload["sha"] = sha
-    r = requests.put(url, headers=HEADERS, json=payload)
-    return r.status_code in [200, 201]
-
-@st.cache_data(ttl=30)
+# ============================================================
+# STORAGE FUNCTIONS
+# ============================================================
 def incarca_pontaj():
-    cols = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
-    content, _ = github_get_file(FILE_PONTAJ)
-    if not content:
-        return pd.DataFrame(columns=cols)
-    from io import StringIO
-    df = pd.read_csv(StringIO(content))
-    return df
+    try:
+        result = st.connection("storage", type="sql")
+    except:
+        pass
+    
+    if KEY_PONTAJ not in st.session_state:
+        st.session_state[KEY_PONTAJ] = []
+    
+    rows = st.session_state[KEY_PONTAJ]
+    if not rows:
+        return pd.DataFrame(columns=COLS)
+    return pd.DataFrame(rows, columns=COLS)
 
 def salveaza_inregistrare(inreg):
-    cols = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
-    content, sha = github_get_file(FILE_PONTAJ)
-    if content:
-        from io import StringIO
-        df = pd.read_csv(StringIO(content))
-    else:
-        df = pd.DataFrame(columns=cols)
-    rand = pd.DataFrame([inreg])
-    df = pd.concat([df, rand], ignore_index=True)
-    csv_str = df.to_csv(index=False)
-    ok = github_put_file(FILE_PONTAJ, csv_str, sha, f"pontaj {inreg['coleg']} {inreg['saptamana']}")
-    if ok:
-        incarca_pontaj.clear()
-    return ok
+    if KEY_PONTAJ not in st.session_state:
+        st.session_state[KEY_PONTAJ] = []
+    st.session_state[KEY_PONTAJ].append([
+        inreg.get(c, "") for c in COLS
+    ])
+    return True
 
-@st.cache_data(ttl=60)
 def incarca_config():
-    content, _ = github_get_file(FILE_CONFIG)
-    if content:
-        try:
-            return json.loads(content)
-        except:
-            pass
-    return CONFIG_DEFAULT.copy()
+    if KEY_CONFIG not in st.session_state:
+        st.session_state[KEY_CONFIG] = CONFIG_DEFAULT.copy()
+    return st.session_state[KEY_CONFIG]
 
 def salveaza_config(config):
-    _, sha = github_get_file(FILE_CONFIG)
-    content = json.dumps(config, ensure_ascii=False, indent=2)
-    ok = github_put_file(FILE_CONFIG, content, sha, "update config")
-    if ok:
-        incarca_config.clear()
-    return ok
+    st.session_state[KEY_CONFIG] = config
+    return True
 
 # ============================================================
 # UTILITARE
@@ -177,7 +140,7 @@ def get_zile_saptamana(luni, duminica):
     while d <= duminica:
         e_sarbatoare = d in SARBATORI_ROMANIA
         e_weekend = d.weekday() >= 5
-        nume_zi = ["Luni","Marți","Miercuri","Joi","Vineri","Sâmbătă","Duminică"][d.weekday()]
+        nume_zi = ["Luni", "Marți", "Miercuri", "Joi", "Vineri", "Sâmbătă", "Duminică"][d.weekday()]
         label = f"{nume_zi} {d.strftime('%d.%m')}"
         if e_sarbatoare: label += " 🔴"
         elif e_weekend: label += " ⚫"
@@ -198,7 +161,7 @@ with st.sidebar:
     st.caption("Allied Engineers MEP © 2026")
 
 # ============================================================
-# PAGINA 1
+# PAGINA 1 - INTRODUCERE ORE
 # ============================================================
 if pagina == "📝 Introducere ore":
     st.title("📝 Pontaj ore")
@@ -234,9 +197,9 @@ if pagina == "📝 Introducere ore":
         with st.form("form_pontaj", clear_on_submit=True):
             ca, cb, cc = st.columns(3)
             with ca:
-                zile_lucratoare = [(l, d) for l, d, el in zile if not el]
-                zi_label = st.selectbox("📅 Ziua", [l for l, d in zile_lucratoare])
-                zi_data = next(d for l, d in zile_lucratoare if l == zi_label)
+                zile_lucr = [(l, d) for l, d, el in zile if not el]
+                zi_label = st.selectbox("📅 Ziua", [l for l, d in zile_lucr])
+                zi_data = next(d for l, d in zile_lucr if l == zi_label)
                 ore = st.number_input("⏱️ Ore lucrate", min_value=0.5, max_value=24.0, value=8.0, step=0.5)
             with cb:
                 proiect = st.selectbox("🏗️ Proiect", sorted(config["proiecte"]))
@@ -255,12 +218,8 @@ if pagina == "📝 Introducere ore":
                     "proiect": proiect, "faza": faza, "subfaza": subfaza,
                     "ore": ore, "comentarii": comentarii
                 }
-                with st.spinner("Se salvează..."):
-                    ok = salveaza_inregistrare(inreg)
-                if ok:
-                    st.success(f"✅ Salvat! {ore}h pe {proiect} — {faza}")
-                else:
-                    st.error("Eroare la salvare. Încearcă din nou.")
+                salveaza_inregistrare(inreg)
+                st.success(f"✅ Salvat! {ore}h pe {proiect} — {faza}")
 
         st.markdown("---")
         st.subheader(f"Intrările tale din {sapt_label.split('—')[0].strip()}")
@@ -272,15 +231,15 @@ if pagina == "📝 Introducere ore":
                 st.info("Nu ai înregistrări pentru această săptămână.")
             else:
                 st.metric("Total ore săptămână", f"{df_cs['ore'].sum():.1f}h")
-                d2 = df_cs[["data_zi","proiect","faza","subfaza","ore","comentarii"]].copy()
-                d2.columns = ["Data","Proiect","Faza","Subfaza","Ore","Comentarii"]
+                d2 = df_cs[["data_zi", "proiect", "faza", "subfaza", "ore", "comentarii"]].copy()
+                d2.columns = ["Data", "Proiect", "Faza", "Subfaza", "Ore", "Comentarii"]
                 d2["Data"] = pd.to_datetime(d2["Data"]).dt.strftime("%d.%m")
                 st.dataframe(d2, use_container_width=True, hide_index=True)
         else:
             st.info("Nu ai înregistrări pentru această săptămână.")
 
 # ============================================================
-# PAGINA 2
+# PAGINA 2 - RAPOARTE
 # ============================================================
 elif pagina == "📊 Rapoarte":
     st.title("📊 Rapoarte pontaj")
@@ -315,17 +274,17 @@ elif pagina == "📊 Rapoarte":
         t1, t2, t3 = st.tabs(["Per coleg", "Per proiect", "Per fază"])
         with t1:
             r = df_f.groupby("coleg")["ore"].sum().sort_values(ascending=False).reset_index()
-            r.columns = ["Coleg","Ore"]; r["Ore"] = r["Ore"].round(1)
+            r.columns = ["Coleg", "Ore"]; r["Ore"] = r["Ore"].round(1)
             st.dataframe(r, use_container_width=True, hide_index=True)
         with t2:
             r = df_f.groupby("proiect")["ore"].sum().sort_values(ascending=False).reset_index()
-            r.columns = ["Proiect","Ore"]; r["Ore"] = r["Ore"].round(1)
+            r.columns = ["Proiect", "Ore"]; r["Ore"] = r["Ore"].round(1)
             t = r["Ore"].sum()
             r["Procent"] = (r["Ore"] / t * 100).round(1).astype(str) + "%"
             st.dataframe(r, use_container_width=True, hide_index=True)
         with t3:
             r = df_f.groupby("faza")["ore"].sum().sort_values(ascending=False).reset_index()
-            r.columns = ["Faza","Ore"]; r["Ore"] = r["Ore"].round(1)
+            r.columns = ["Faza", "Ore"]; r["Ore"] = r["Ore"].round(1)
             st.dataframe(r, use_container_width=True, hide_index=True)
 
         st.markdown("---")
@@ -335,7 +294,7 @@ elif pagina == "📊 Rapoarte":
             mime="text/csv", use_container_width=True)
 
 # ============================================================
-# PAGINA 3
+# PAGINA 3 - ADMINISTRARE
 # ============================================================
 elif pagina == "⚙️ Administrare":
     st.title("⚙️ Administrare liste")
@@ -356,11 +315,9 @@ elif pagina == "⚙️ Administrare":
             if st.button(f"💾 Salvează {titlu}", key=f"sv_{cheie}"):
                 elemente = [x.strip() for x in nou.split("\n") if x.strip()]
                 config[cheie] = elemente
-                with st.spinner("Se salvează..."):
-                    ok = salveaza_config(config)
-                if ok:
-                    st.success(f"✅ {titlu} actualizate! ({len(elemente)} elemente)")
-                    st.rerun()
+                salveaza_config(config)
+                st.success(f"✅ {titlu} actualizate! ({len(elemente)} elemente)")
+                st.rerun()
 
     editor(t1, "proiecte", "Proiecte")
     editor(t2, "colegi", "Colegi")
@@ -368,10 +325,14 @@ elif pagina == "⚙️ Administrare":
     editor(t4, "subfaze", "Subfaze")
 
     st.markdown("---")
-    st.subheader("🗃️ Date pontaj")
+    st.subheader("🗃️ Export date")
     df = incarca_pontaj()
     if len(df) > 0:
-        st.write(f"Total înregistrări: **{len(df)}**")
-        st.dataframe(df.tail(20), use_container_width=True)
+        st.write(f"Total înregistrări în sesiunea curentă: **{len(df)}**")
+        st.dataframe(df, use_container_width=True)
+        csv = df.to_csv(index=False, encoding="utf-8")
+        st.download_button("⬇️ Descarcă toate datele CSV", data=csv,
+            file_name=f"pontaj_complet_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv", use_container_width=True)
     else:
         st.info("Nu există date salvate încă.")
