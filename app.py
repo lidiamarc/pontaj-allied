@@ -1,18 +1,28 @@
 import streamlit as st
 import pandas as pd
 import json
-import os
+import base64
+import requests
 from datetime import datetime, date, timedelta
-import gspread
-from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="Pontaj Allied Engineers", page_icon="🏗️", layout="wide")
 
-SHEET_ID = "1QXjwUep9mYj_eStxQUuHUo4juT2-YH3g2Mwmta-DMGg"
-SHEET_PONTAJ = "Pontaj"
-SHEET_CONFIG = "Config"
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+# ============================================================
+# GITHUB CONFIG
+# ============================================================
+GITHUB_TOKEN = st.secrets["github"]["token"]
+GITHUB_REPO = "lidiamarc/pontaj-allied"
+FILE_PONTAJ = "data/pontaj.csv"
+FILE_CONFIG = "data/config.json"
 
+HEADERS = {
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github.v3+json"
+}
+
+# ============================================================
+# SARBATORI LEGALE ROMANIA 2026
+# ============================================================
 SARBATORI_ROMANIA = [
     date(2026, 1, 1), date(2026, 1, 2), date(2026, 4, 10), date(2026, 4, 12),
     date(2026, 4, 13), date(2026, 5, 1), date(2026, 6, 1), date(2026, 6, 8),
@@ -78,112 +88,74 @@ CONFIG_DEFAULT = {
     ]
 }
 
-@st.cache_resource
-def get_gsheet_client():
-    try:
-        creds_dict = st.secrets["gcp_service_account"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-        return gspread.authorize(creds)
-    except Exception as e:
-        st.error(f"Eroare conectare Google Sheets: {e}")
-        return None
+# ============================================================
+# GITHUB FILE OPERATIONS
+# ============================================================
+def github_get_file(path):
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+    r = requests.get(url, headers=HEADERS)
+    if r.status_code == 200:
+        data = r.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"]
+    return None, None
 
-def get_or_create_sheet(client, sheet_name, headers):
-    try:
-        spreadsheet = client.open_by_key(SHEET_ID)
-        try:
-            ws = spreadsheet.worksheet(sheet_name)
-        except gspread.WorksheetNotFound:
-            ws = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
-            ws.append_row(headers)
-        return ws
-    except Exception as e:
-        st.error(f"Eroare sheet {sheet_name}: {e}")
-        return None
+def github_put_file(path, content, sha=None, message="update data"):
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+    encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+    payload = {"message": message, "content": encoded}
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(url, headers=HEADERS, json=payload)
+    return r.status_code in [200, 201]
 
 @st.cache_data(ttl=30)
 def incarca_pontaj():
-    client = get_gsheet_client()
-    headers = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
-    if not client:
-        return pd.DataFrame(columns=headers)
-    ws = get_or_create_sheet(client, SHEET_PONTAJ, headers)
-    if not ws:
-        return pd.DataFrame(columns=headers)
-    try:
-        data = ws.get_all_records()
-        if not data:
-            return pd.DataFrame(columns=headers)
-        return pd.DataFrame(data)
-    except:
-        return pd.DataFrame(columns=headers)
+    cols = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
+    content, _ = github_get_file(FILE_PONTAJ)
+    if not content:
+        return pd.DataFrame(columns=cols)
+    from io import StringIO
+    df = pd.read_csv(StringIO(content))
+    return df
 
-def salveaza_inregistrare(inregistrare):
-    client = get_gsheet_client()
-    if not client:
-        return False
-    headers = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
-    ws = get_or_create_sheet(client, SHEET_PONTAJ, headers)
-    if not ws:
-        return False
-    try:
-        row = [str(inregistrare.get(h, "")) for h in headers]
-        ws.append_row(row)
-        return True
-    except Exception as e:
-        st.error(f"Eroare salvare: {e}")
-        return False
+def salveaza_inregistrare(inreg):
+    cols = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
+    content, sha = github_get_file(FILE_PONTAJ)
+    if content:
+        from io import StringIO
+        df = pd.read_csv(StringIO(content))
+    else:
+        df = pd.DataFrame(columns=cols)
+    rand = pd.DataFrame([inreg])
+    df = pd.concat([df, rand], ignore_index=True)
+    csv_str = df.to_csv(index=False)
+    ok = github_put_file(FILE_PONTAJ, csv_str, sha, f"pontaj {inreg['coleg']} {inreg['saptamana']}")
+    if ok:
+        incarca_pontaj.clear()
+    return ok
 
 @st.cache_data(ttl=60)
 def incarca_config():
-    client = get_gsheet_client()
-    if not client:
-        return CONFIG_DEFAULT.copy()
-    try:
-        spreadsheet = client.open_by_key(SHEET_ID)
+    content, _ = github_get_file(FILE_CONFIG)
+    if content:
         try:
-            ws = spreadsheet.worksheet(SHEET_CONFIG)
-            data = ws.get_all_records()
-            if data:
-                config = {}
-                for row in data:
-                    cheie = row.get("cheie", "")
-                    valoare = row.get("valoare", "")
-                    if cheie and valoare:
-                        if cheie not in config:
-                            config[cheie] = []
-                        config[cheie].append(valoare)
-                if all(k in config for k in ["proiecte","colegi","faze","subfaze"]):
-                    return config
-        except gspread.WorksheetNotFound:
+            return json.loads(content)
+        except:
             pass
-    except:
-        pass
     return CONFIG_DEFAULT.copy()
 
 def salveaza_config(config):
-    client = get_gsheet_client()
-    if not client:
-        return False
-    try:
-        spreadsheet = client.open_by_key(SHEET_ID)
-        try:
-            ws = spreadsheet.worksheet(SHEET_CONFIG)
-            ws.clear()
-        except gspread.WorksheetNotFound:
-            ws = spreadsheet.add_worksheet(title=SHEET_CONFIG, rows=500, cols=3)
-        ws.append_row(["cheie", "valoare"])
-        rows = []
-        for cheie, lista in config.items():
-            for valoare in lista:
-                rows.append([cheie, valoare])
-        if rows:
-            ws.append_rows(rows)
-        return True
-    except Exception as e:
-        st.error(f"Eroare salvare config: {e}")
-        return False
+    _, sha = github_get_file(FILE_CONFIG)
+    content = json.dumps(config, ensure_ascii=False, indent=2)
+    ok = github_put_file(FILE_CONFIG, content, sha, "update config")
+    if ok:
+        incarca_config.clear()
+    return ok
 
+# ============================================================
+# UTILITARE
+# ============================================================
 def get_saptamani_2026():
     saptamani = []
     vazute = set()
@@ -207,14 +179,15 @@ def get_zile_saptamana(luni, duminica):
         e_weekend = d.weekday() >= 5
         nume_zi = ["Luni","Marți","Miercuri","Joi","Vineri","Sâmbătă","Duminică"][d.weekday()]
         label = f"{nume_zi} {d.strftime('%d.%m')}"
-        if e_sarbatoare:
-            label += " 🔴"
-        elif e_weekend:
-            label += " ⚫"
+        if e_sarbatoare: label += " 🔴"
+        elif e_weekend: label += " ⚫"
         zile.append((label, d, e_weekend or e_sarbatoare))
         d += timedelta(days=1)
     return zile
 
+# ============================================================
+# APP
+# ============================================================
 config = incarca_config()
 
 with st.sidebar:
@@ -224,6 +197,9 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Allied Engineers MEP © 2026")
 
+# ============================================================
+# PAGINA 1
+# ============================================================
 if pagina == "📝 Introducere ore":
     st.title("📝 Pontaj ore")
     st.markdown("Completează orele lucrate pentru săptămâna selectată.")
@@ -231,26 +207,23 @@ if pagina == "📝 Introducere ore":
 
     col1, col2 = st.columns(2)
     with col1:
-        coleg = st.selectbox("👤 Numele tău", options=["— selectează —"] + sorted(config["colegi"]))
+        coleg = st.selectbox("👤 Numele tău", ["— selectează —"] + sorted(config["colegi"]))
         saptamani = get_saptamani_2026()
         azi = date.today()
-        sapt_curenta = 0
+        sapt_idx = 0
         for i, (label, cod, luni, dum) in enumerate(saptamani):
             if luni <= azi <= dum:
-                sapt_curenta = i
+                sapt_idx = i
                 break
-        sapt_selectata_label = st.selectbox("📅 Săptămâna", options=[s[0] for s in saptamani], index=sapt_curenta)
-        sapt_info = next(s for s in saptamani if s[0] == sapt_selectata_label)
+        sapt_label = st.selectbox("📅 Săptămâna", [s[0] for s in saptamani], index=sapt_idx)
+        sapt_info = next(s for s in saptamani if s[0] == sapt_label)
         sapt_cod, sapt_luni, sapt_dum = sapt_info[1], sapt_info[2], sapt_info[3]
 
     with col2:
         st.markdown("**📆 Zilele săptămânii:**")
         zile = get_zile_saptamana(sapt_luni, sapt_dum)
-        for label_zi, data_zi, e_liber in zile:
-            if e_liber:
-                st.caption(f"~~{label_zi}~~")
-            else:
-                st.caption(label_zi)
+        for lz, dz, el in zile:
+            st.caption(f"~~{lz}~~" if el else lz)
 
     st.markdown("---")
 
@@ -259,54 +232,56 @@ if pagina == "📝 Introducere ore":
     else:
         st.subheader(f"Adaugă intrare pentru {coleg}")
         with st.form("form_pontaj", clear_on_submit=True):
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                optiuni_zile = [(l, d) for l, d, e_liber in zile if not e_liber]
-                zi_selectata_label = st.selectbox("📅 Ziua", [l for l, d in optiuni_zile])
-                zi_selectata_data = next(d for l, d in optiuni_zile if l == zi_selectata_label)
+            ca, cb, cc = st.columns(3)
+            with ca:
+                zile_lucratoare = [(l, d) for l, d, el in zile if not el]
+                zi_label = st.selectbox("📅 Ziua", [l for l, d in zile_lucratoare])
+                zi_data = next(d for l, d in zile_lucratoare if l == zi_label)
                 ore = st.number_input("⏱️ Ore lucrate", min_value=0.5, max_value=24.0, value=8.0, step=0.5)
-            with col_b:
-                proiect = st.selectbox("🏗️ Proiect", options=sorted(config["proiecte"]))
-                faza = st.selectbox("📐 Faza", options=config["faze"])
-            with col_c:
-                subfaza_opt = ["— fără subfază —"] + config["subfaze"]
-                subfaza = st.selectbox("🔍 Subfază", options=subfaza_opt)
-                if subfaza == "— fără subfază —":
-                    subfaza = ""
+            with cb:
+                proiect = st.selectbox("🏗️ Proiect", sorted(config["proiecte"]))
+                faza = st.selectbox("📐 Faza", config["faze"])
+            with cc:
+                sf_opt = ["— fără subfază —"] + config["subfaze"]
+                subfaza = st.selectbox("🔍 Subfază", sf_opt)
+                if subfaza == "— fără subfază —": subfaza = ""
                 comentarii = st.text_input("💬 Comentarii", placeholder="opțional...")
 
-            submitted = st.form_submit_button("✅ Salvează înregistrarea", use_container_width=True)
-            if submitted:
+            if st.form_submit_button("✅ Salvează înregistrarea", use_container_width=True):
                 inreg = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "coleg": coleg, "saptamana": sapt_cod,
-                    "data_zi": zi_selectata_data.strftime("%Y-%m-%d"),
+                    "data_zi": zi_data.strftime("%Y-%m-%d"),
                     "proiect": proiect, "faza": faza, "subfaza": subfaza,
                     "ore": ore, "comentarii": comentarii
                 }
-                with st.spinner("Se salvează în Google Sheets..."):
+                with st.spinner("Se salvează..."):
                     ok = salveaza_inregistrare(inreg)
                 if ok:
                     st.success(f"✅ Salvat! {ore}h pe {proiect} — {faza}")
-                    incarca_pontaj.clear()
+                else:
+                    st.error("Eroare la salvare. Încearcă din nou.")
 
         st.markdown("---")
-        st.subheader(f"Intrările tale din {sapt_selectata_label.split('—')[0].strip()}")
+        st.subheader(f"Intrările tale din {sapt_label.split('—')[0].strip()}")
         df = incarca_pontaj()
         if len(df) > 0:
             df["ore"] = pd.to_numeric(df["ore"], errors="coerce")
             df_cs = df[(df["coleg"] == coleg) & (df["saptamana"] == sapt_cod)]
             if len(df_cs) == 0:
-                st.info("Nu ai înregistrări pentru această săptămână încă.")
+                st.info("Nu ai înregistrări pentru această săptămână.")
             else:
                 st.metric("Total ore săptămână", f"{df_cs['ore'].sum():.1f}h")
-                df_d = df_cs[["data_zi","proiect","faza","subfaza","ore","comentarii"]].copy()
-                df_d.columns = ["Data","Proiect","Faza","Subfaza","Ore","Comentarii"]
-                df_d["Data"] = pd.to_datetime(df_d["Data"]).dt.strftime("%d.%m")
-                st.dataframe(df_d, use_container_width=True, hide_index=True)
+                d2 = df_cs[["data_zi","proiect","faza","subfaza","ore","comentarii"]].copy()
+                d2.columns = ["Data","Proiect","Faza","Subfaza","Ore","Comentarii"]
+                d2["Data"] = pd.to_datetime(d2["Data"]).dt.strftime("%d.%m")
+                st.dataframe(d2, use_container_width=True, hide_index=True)
         else:
-            st.info("Nu ai înregistrări pentru această săptămână încă.")
+            st.info("Nu ai înregistrări pentru această săptămână.")
 
+# ============================================================
+# PAGINA 2
+# ============================================================
 elif pagina == "📊 Rapoarte":
     st.title("📊 Rapoarte pontaj")
     st.markdown("---")
@@ -315,19 +290,19 @@ elif pagina == "📊 Rapoarte":
         st.info("Nu există date de pontaj încă.")
     else:
         df["ore"] = pd.to_numeric(df["ore"], errors="coerce")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            sapt_disp = sorted(df["saptamana"].dropna().unique().tolist())
-            sapt_f = st.multiselect("Săptămâna", options=sapt_disp, default=sapt_disp[-1:] if sapt_disp else [])
-        with col2:
-            coleg_f = st.multiselect("Coleg", options=sorted(df["coleg"].dropna().unique().tolist()))
-        with col3:
-            proiect_f = st.multiselect("Proiect", options=sorted(df["proiect"].dropna().unique().tolist()))
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            sd = sorted(df["saptamana"].dropna().unique().tolist())
+            sf = st.multiselect("Săptămâna", sd, default=sd[-1:] if sd else [])
+        with c2:
+            cf = st.multiselect("Coleg", sorted(df["coleg"].dropna().unique().tolist()))
+        with c3:
+            pf = st.multiselect("Proiect", sorted(df["proiect"].dropna().unique().tolist()))
 
         df_f = df.copy()
-        if sapt_f: df_f = df_f[df_f["saptamana"].isin(sapt_f)]
-        if coleg_f: df_f = df_f[df_f["coleg"].isin(coleg_f)]
-        if proiect_f: df_f = df_f[df_f["proiect"].isin(proiect_f)]
+        if sf: df_f = df_f[df_f["saptamana"].isin(sf)]
+        if cf: df_f = df_f[df_f["coleg"].isin(cf)]
+        if pf: df_f = df_f[df_f["proiect"].isin(pf)]
 
         st.markdown("---")
         m1, m2, m3, m4 = st.columns(4)
@@ -345,8 +320,8 @@ elif pagina == "📊 Rapoarte":
         with t2:
             r = df_f.groupby("proiect")["ore"].sum().sort_values(ascending=False).reset_index()
             r.columns = ["Proiect","Ore"]; r["Ore"] = r["Ore"].round(1)
-            total = r["Ore"].sum()
-            r["Procent"] = (r["Ore"] / total * 100).round(1).astype(str) + "%"
+            t = r["Ore"].sum()
+            r["Procent"] = (r["Ore"] / t * 100).round(1).astype(str) + "%"
             st.dataframe(r, use_container_width=True, hide_index=True)
         with t3:
             r = df_f.groupby("faza")["ore"].sum().sort_values(ascending=False).reset_index()
@@ -359,6 +334,9 @@ elif pagina == "📊 Rapoarte":
             file_name=f"pontaj_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv", use_container_width=True)
 
+# ============================================================
+# PAGINA 3
+# ============================================================
 elif pagina == "⚙️ Administrare":
     st.title("⚙️ Administrare liste")
     parola = st.text_input("🔒 Parolă admin", type="password")
@@ -369,26 +347,25 @@ elif pagina == "⚙️ Administrare":
 
     st.success("✅ Acces acordat.")
     st.markdown("---")
-    tab_p, tab_c, tab_f, tab_sf = st.tabs(["Proiecte", "Colegi", "Faze", "Subfaze"])
+    t1, t2, t3, t4 = st.tabs(["Proiecte", "Colegi", "Faze", "Subfaze"])
 
-    def editor_lista(tab, cheie, titlu):
+    def editor(tab, cheie, titlu):
         with tab:
             st.subheader(titlu)
-            lista_noua = st.text_area("Un element pe linie:", value="\n".join(config[cheie]), height=400, key=f"ed_{cheie}")
+            nou = st.text_area("Un element pe linie:", value="\n".join(config[cheie]), height=400, key=f"ed_{cheie}")
             if st.button(f"💾 Salvează {titlu}", key=f"sv_{cheie}"):
-                elemente = [x.strip() for x in lista_noua.split("\n") if x.strip()]
+                elemente = [x.strip() for x in nou.split("\n") if x.strip()]
                 config[cheie] = elemente
                 with st.spinner("Se salvează..."):
                     ok = salveaza_config(config)
                 if ok:
                     st.success(f"✅ {titlu} actualizate! ({len(elemente)} elemente)")
-                    incarca_config.clear()
                     st.rerun()
 
-    editor_lista(tab_p, "proiecte", "Proiecte")
-    editor_lista(tab_c, "colegi", "Colegi")
-    editor_lista(tab_f, "faze", "Faze")
-    editor_lista(tab_sf, "subfaze", "Subfaze")
+    editor(t1, "proiecte", "Proiecte")
+    editor(t2, "colegi", "Colegi")
+    editor(t3, "faze", "Faze")
+    editor(t4, "subfaze", "Subfaze")
 
     st.markdown("---")
     st.subheader("🗃️ Date pontaj")
