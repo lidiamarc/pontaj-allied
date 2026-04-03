@@ -3,47 +3,23 @@ import pandas as pd
 import json
 import os
 from datetime import datetime, date, timedelta
-import calendar
+import gspread
+from google.oauth2.service_account import Credentials
 
-# ============================================================
-# CONFIGURARE PAGINA
-# ============================================================
-st.set_page_config(
-    page_title="Pontaj Allied Engineers",
-    page_icon="🏗️",
-    layout="wide"
-)
+st.set_page_config(page_title="Pontaj Allied Engineers", page_icon="🏗️", layout="wide")
 
-# ============================================================
-# FISIERE DE DATE
-# Toate datele se salveaza in fisiere locale JSON si CSV
-# ============================================================
-FISIER_PONTAJ = "pontaj_date.csv"
-FISIER_CONFIG = "config.json"
+SHEET_ID = "1QXjwUep9mYj_eStxQUuHUo4juT2-YH3g2Mwmta-DMGg"
+SHEET_PONTAJ = "Pontaj"
+SHEET_CONFIG = "Config"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
-# ============================================================
-# SARBATORI LEGALE ROMANIA 2026
-# ============================================================
 SARBATORI_ROMANIA = [
-    date(2026, 1, 1),   # Anul Nou
-    date(2026, 1, 2),   # Anul Nou
-    date(2026, 4, 10),  # Vinerea Mare
-    date(2026, 4, 12),  # Paste
-    date(2026, 4, 13),  # Paste
-    date(2026, 5, 1),   # Ziua Muncii
-    date(2026, 6, 1),   # Ziua Copilului
-    date(2026, 6, 8),   # Rusalii (Duminica)  
-    date(2026, 6, 9),   # Rusalii (Luni)
-    date(2026, 8, 15),  # Adormirea Maicii Domnului
-    date(2026, 11, 30), # Sf. Andrei
-    date(2026, 12, 1),  # Ziua Nationala
-    date(2026, 12, 25), # Craciun
-    date(2026, 12, 26), # Craciun
+    date(2026, 1, 1), date(2026, 1, 2), date(2026, 4, 10), date(2026, 4, 12),
+    date(2026, 4, 13), date(2026, 5, 1), date(2026, 6, 1), date(2026, 6, 8),
+    date(2026, 6, 9), date(2026, 8, 15), date(2026, 11, 30),
+    date(2026, 12, 1), date(2026, 12, 25), date(2026, 12, 26),
 ]
 
-# ============================================================
-# DATE IMPLICITE (prima rulare)
-# ============================================================
 CONFIG_DEFAULT = {
     "proiecte": [
         "907", "000.CO", "010.INVATARE", "020.DIVERSE", "03.PROIECTE LICITATIE",
@@ -98,38 +74,138 @@ CONFIG_DEFAULT = {
     "subfaze": [
         "ESTIMARE LISTA DE CANTITATI", "întocmire documentație",
         "ACTUALIZARE MODEL", "Calcul piloti", "Coordonare echipa",
-        "Editare memoriu", "EXPERTIZA TEHNICA", "PUNCT DE VEDERE",
-        "REAUTORIZARE"
+        "Editare memoriu", "EXPERTIZA TEHNICA", "PUNCT DE VEDERE", "REAUTORIZARE"
     ]
 }
 
-# ============================================================
-# FUNCTII UTILITARE
-# ============================================================
+@st.cache_resource
+def get_gsheet_client():
+    try:
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        return gspread.authorize(creds)
+    except Exception as e:
+        st.error(f"Eroare conectare Google Sheets: {e}")
+        return None
+
+def get_or_create_sheet(client, sheet_name, headers):
+    try:
+        spreadsheet = client.open_by_key(SHEET_ID)
+        try:
+            ws = spreadsheet.worksheet(sheet_name)
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
+            ws.append_row(headers)
+        return ws
+    except Exception as e:
+        st.error(f"Eroare sheet {sheet_name}: {e}")
+        return None
+
+@st.cache_data(ttl=30)
+def incarca_pontaj():
+    client = get_gsheet_client()
+    headers = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
+    if not client:
+        return pd.DataFrame(columns=headers)
+    ws = get_or_create_sheet(client, SHEET_PONTAJ, headers)
+    if not ws:
+        return pd.DataFrame(columns=headers)
+    try:
+        data = ws.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=headers)
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame(columns=headers)
+
+def salveaza_inregistrare(inregistrare):
+    client = get_gsheet_client()
+    if not client:
+        return False
+    headers = ["timestamp","coleg","saptamana","data_zi","proiect","faza","subfaza","ore","comentarii"]
+    ws = get_or_create_sheet(client, SHEET_PONTAJ, headers)
+    if not ws:
+        return False
+    try:
+        row = [str(inregistrare.get(h, "")) for h in headers]
+        ws.append_row(row)
+        return True
+    except Exception as e:
+        st.error(f"Eroare salvare: {e}")
+        return False
+
+@st.cache_data(ttl=60)
+def incarca_config():
+    client = get_gsheet_client()
+    if not client:
+        return CONFIG_DEFAULT.copy()
+    try:
+        spreadsheet = client.open_by_key(SHEET_ID)
+        try:
+            ws = spreadsheet.worksheet(SHEET_CONFIG)
+            data = ws.get_all_records()
+            if data:
+                config = {}
+                for row in data:
+                    cheie = row.get("cheie", "")
+                    valoare = row.get("valoare", "")
+                    if cheie and valoare:
+                        if cheie not in config:
+                            config[cheie] = []
+                        config[cheie].append(valoare)
+                if all(k in config for k in ["proiecte","colegi","faze","subfaze"]):
+                    return config
+        except gspread.WorksheetNotFound:
+            pass
+    except:
+        pass
+    return CONFIG_DEFAULT.copy()
+
+def salveaza_config(config):
+    client = get_gsheet_client()
+    if not client:
+        return False
+    try:
+        spreadsheet = client.open_by_key(SHEET_ID)
+        try:
+            ws = spreadsheet.worksheet(SHEET_CONFIG)
+            ws.clear()
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet(title=SHEET_CONFIG, rows=500, cols=3)
+        ws.append_row(["cheie", "valoare"])
+        rows = []
+        for cheie, lista in config.items():
+            for valoare in lista:
+                rows.append([cheie, valoare])
+        if rows:
+            ws.append_rows(rows)
+        return True
+    except Exception as e:
+        st.error(f"Eroare salvare config: {e}")
+        return False
 
 def get_saptamani_2026():
-    """Genereaza lista de saptamani pentru 2026"""
     saptamani = []
+    vazute = set()
     d = date(2026, 1, 1)
     while d.year == 2026:
-        # Gaseste lunea saptamanii
         luni = d - timedelta(days=d.weekday())
         duminica = luni + timedelta(days=6)
         week_num = d.isocalendar()[1]
         label = f"W{week_num:02d} — {luni.strftime('%d.%m')} – {duminica.strftime('%d.%m.%Y')}"
-        if label not in [s[0] for s in saptamani]:
+        if label not in vazute:
             saptamani.append((label, f"w{week_num:02d}", luni, duminica))
+            vazute.add(label)
         d += timedelta(days=7)
     return saptamani
 
 def get_zile_saptamana(luni, duminica):
-    """Returneaza zilele dintr-o saptamana cu marcaj sarbatori"""
     zile = []
     d = luni
     while d <= duminica:
         e_sarbatoare = d in SARBATORI_ROMANIA
         e_weekend = d.weekday() >= 5
-        nume_zi = ["Luni", "Marți", "Miercuri", "Joi", "Vineri", "Sâmbătă", "Duminică"][d.weekday()]
+        nume_zi = ["Luni","Marți","Miercuri","Joi","Vineri","Sâmbătă","Duminică"][d.weekday()]
         label = f"{nume_zi} {d.strftime('%d.%m')}"
         if e_sarbatoare:
             label += " 🔴"
@@ -139,104 +215,35 @@ def get_zile_saptamana(luni, duminica):
         d += timedelta(days=1)
     return zile
 
-def incarca_config():
-    """Incarca configuratia din fisier sau foloseste default"""
-    if os.path.exists(FISIER_CONFIG):
-        with open(FISIER_CONFIG, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return CONFIG_DEFAULT.copy()
-
-def salveaza_config(config):
-    """Salveaza configuratia in fisier"""
-    with open(FISIER_CONFIG, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
-
-def incarca_pontaj():
-    """Incarca datele de pontaj din CSV"""
-    if os.path.exists(FISIER_PONTAJ):
-        return pd.read_csv(FISIER_PONTAJ, encoding="utf-8")
-    else:
-        return pd.DataFrame(columns=[
-            "timestamp", "coleg", "saptamana", "data_zi",
-            "proiect", "faza", "subfaza", "ore", "comentarii"
-        ])
-
-def salveaza_inregistrare(inregistrare):
-    """Adauga o inregistrare noua in CSV"""
-    df = incarca_pontaj()
-    rand_nou = pd.DataFrame([inregistrare])
-    df = pd.concat([df, rand_nou], ignore_index=True)
-    df.to_csv(FISIER_PONTAJ, index=False, encoding="utf-8")
-
-def sterge_inregistrare(index):
-    """Sterge o inregistrare dupa index"""
-    df = incarca_pontaj()
-    df = df.drop(index=index).reset_index(drop=True)
-    df.to_csv(FISIER_PONTAJ, index=False, encoding="utf-8")
-
-# ============================================================
-# INTERFATA PRINCIPALA
-# ============================================================
-
 config = incarca_config()
 
-# Sidebar — navigare
 with st.sidebar:
-    st.image("https://via.placeholder.com/200x60/1a1a2e/ffffff?text=Allied+Engineers", width=200)
+    st.markdown("### 🏗️ Allied Engineers")
     st.markdown("---")
-    pagina = st.radio(
-        "Navigare",
-        ["📝 Introducere ore", "📊 Rapoarte", "⚙️ Administrare"],
-        label_visibility="collapsed"
-    )
+    pagina = st.radio("Navigare", ["📝 Introducere ore", "📊 Rapoarte", "⚙️ Administrare"], label_visibility="collapsed")
     st.markdown("---")
     st.caption("Allied Engineers MEP © 2026")
 
-# ============================================================
-# PAGINA 1 — INTRODUCERE ORE
-# ============================================================
 if pagina == "📝 Introducere ore":
     st.title("📝 Pontaj ore")
     st.markdown("Completează orele lucrate pentru săptămâna selectată.")
     st.markdown("---")
 
     col1, col2 = st.columns(2)
-
     with col1:
-        # Selectie coleg
-        coleg = st.selectbox(
-            "👤 Numele tău",
-            options=["— selectează —"] + sorted(config["colegi"]),
-            key="coleg"
-        )
-
-        # Selectie saptamana
+        coleg = st.selectbox("👤 Numele tău", options=["— selectează —"] + sorted(config["colegi"]))
         saptamani = get_saptamani_2026()
-        optiuni_sapt = [s[0] for s in saptamani]
-
-        # Gaseste saptamana curenta
         azi = date.today()
         sapt_curenta = 0
         for i, (label, cod, luni, dum) in enumerate(saptamani):
             if luni <= azi <= dum:
                 sapt_curenta = i
                 break
-
-        sapt_selectata_label = st.selectbox(
-            "📅 Săptămâna",
-            options=optiuni_sapt,
-            index=sapt_curenta,
-            key="saptamana"
-        )
-
-        # Gaseste datele saptamanii selectate
+        sapt_selectata_label = st.selectbox("📅 Săptămâna", options=[s[0] for s in saptamani], index=sapt_curenta)
         sapt_info = next(s for s in saptamani if s[0] == sapt_selectata_label)
-        sapt_cod = sapt_info[1]
-        sapt_luni = sapt_info[2]
-        sapt_dum = sapt_info[3]
+        sapt_cod, sapt_luni, sapt_dum = sapt_info[1], sapt_info[2], sapt_info[3]
 
     with col2:
-        # Afiseaza zilele saptamanii
         st.markdown("**📆 Zilele săptămânii:**")
         zile = get_zile_saptamana(sapt_luni, sapt_dum)
         for label_zi, data_zi, e_liber in zile:
@@ -247,225 +254,136 @@ if pagina == "📝 Introducere ore":
 
     st.markdown("---")
 
-    # ---- FORMULAR INREGISTRARE ----
     if coleg == "— selectează —":
         st.info("👆 Selectează-ți numele pentru a continua.")
     else:
         st.subheader(f"Adaugă intrare pentru {coleg}")
-
         with st.form("form_pontaj", clear_on_submit=True):
             col_a, col_b, col_c = st.columns(3)
-
             with col_a:
-                # Ziua
                 optiuni_zile = [(l, d) for l, d, e_liber in zile if not e_liber]
-                optiuni_zile_labels = [l for l, d in optiuni_zile]
-                zi_selectata_label = st.selectbox("📅 Ziua", optiuni_zile_labels)
+                zi_selectata_label = st.selectbox("📅 Ziua", [l for l, d in optiuni_zile])
                 zi_selectata_data = next(d for l, d in optiuni_zile if l == zi_selectata_label)
-
-                # Ore
-                ore = st.number_input(
-                    "⏱️ Ore lucrate",
-                    min_value=0.5, max_value=24.0,
-                    value=8.0, step=0.5
-                )
-
+                ore = st.number_input("⏱️ Ore lucrate", min_value=0.5, max_value=24.0, value=8.0, step=0.5)
             with col_b:
-                # Proiect
-                proiect = st.selectbox(
-                    "🏗️ Proiect",
-                    options=sorted(config["proiecte"])
-                )
-
-                # Faza
-                faza = st.selectbox(
-                    "📐 Faza",
-                    options=config["faze"]
-                )
-
+                proiect = st.selectbox("🏗️ Proiect", options=sorted(config["proiecte"]))
+                faza = st.selectbox("📐 Faza", options=config["faze"])
             with col_c:
-                # Subfaza
-                optiuni_subfaza = ["— fără subfază —"] + config["subfaze"]
-                subfaza = st.selectbox(
-                    "🔍 Subfază",
-                    options=optiuni_subfaza
-                )
+                subfaza_opt = ["— fără subfază —"] + config["subfaze"]
+                subfaza = st.selectbox("🔍 Subfază", options=subfaza_opt)
                 if subfaza == "— fără subfază —":
                     subfaza = ""
-
-                # Comentarii
-                comentarii = st.text_input(
-                    "💬 Comentarii",
-                    placeholder="opțional..."
-                )
+                comentarii = st.text_input("💬 Comentarii", placeholder="opțional...")
 
             submitted = st.form_submit_button("✅ Salvează înregistrarea", use_container_width=True)
-
             if submitted:
-                inregistrare = {
+                inreg = {
                     "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "coleg": coleg,
-                    "saptamana": sapt_cod,
+                    "coleg": coleg, "saptamana": sapt_cod,
                     "data_zi": zi_selectata_data.strftime("%Y-%m-%d"),
-                    "proiect": proiect,
-                    "faza": faza,
-                    "subfaza": subfaza,
-                    "ore": ore,
-                    "comentarii": comentarii
+                    "proiect": proiect, "faza": faza, "subfaza": subfaza,
+                    "ore": ore, "comentarii": comentarii
                 }
-                salveaza_inregistrare(inregistrare)
-                st.success(f"✅ Salvat! {ore}h pe {proiect} — {faza}")
+                with st.spinner("Se salvează în Google Sheets..."):
+                    ok = salveaza_inregistrare(inreg)
+                if ok:
+                    st.success(f"✅ Salvat! {ore}h pe {proiect} — {faza}")
+                    incarca_pontaj.clear()
 
-        # ---- INTRARI EXISTENTE ALE COLEGULUI ----
         st.markdown("---")
         st.subheader(f"Intrările tale din {sapt_selectata_label.split('—')[0].strip()}")
-
         df = incarca_pontaj()
-        df_coleg_sapt = df[(df["coleg"] == coleg) & (df["saptamana"] == sapt_cod)]
-
-        if len(df_coleg_sapt) == 0:
-            st.info("Nu ai înregistrări pentru această săptămână încă.")
+        if len(df) > 0:
+            df["ore"] = pd.to_numeric(df["ore"], errors="coerce")
+            df_cs = df[(df["coleg"] == coleg) & (df["saptamana"] == sapt_cod)]
+            if len(df_cs) == 0:
+                st.info("Nu ai înregistrări pentru această săptămână încă.")
+            else:
+                st.metric("Total ore săptămână", f"{df_cs['ore'].sum():.1f}h")
+                df_d = df_cs[["data_zi","proiect","faza","subfaza","ore","comentarii"]].copy()
+                df_d.columns = ["Data","Proiect","Faza","Subfaza","Ore","Comentarii"]
+                df_d["Data"] = pd.to_datetime(df_d["Data"]).dt.strftime("%d.%m")
+                st.dataframe(df_d, use_container_width=True, hide_index=True)
         else:
-            total_ore = df_coleg_sapt["ore"].sum()
-            st.metric("Total ore săptămână", f"{total_ore:.1f}h")
+            st.info("Nu ai înregistrări pentru această săptămână încă.")
 
-            # Afiseaza tabelul
-            df_display = df_coleg_sapt[["data_zi", "proiect", "faza", "subfaza", "ore", "comentarii"]].copy()
-            df_display.columns = ["Data", "Proiect", "Faza", "Subfaza", "Ore", "Comentarii"]
-            df_display["Data"] = pd.to_datetime(df_display["Data"]).dt.strftime("%d.%m")
-            st.dataframe(df_display, use_container_width=True, hide_index=True)
-
-# ============================================================
-# PAGINA 2 — RAPOARTE
-# ============================================================
 elif pagina == "📊 Rapoarte":
     st.title("📊 Rapoarte pontaj")
     st.markdown("---")
-
     df = incarca_pontaj()
-
     if len(df) == 0:
         st.info("Nu există date de pontaj încă.")
     else:
         df["ore"] = pd.to_numeric(df["ore"], errors="coerce")
-
         col1, col2, col3 = st.columns(3)
-
-        # Filtre
         with col1:
-            saptamani_disponibile = sorted(df["saptamana"].dropna().unique().tolist())
-            sapt_filtru = st.multiselect(
-                "Săptămâna",
-                options=saptamani_disponibile,
-                default=saptamani_disponibile[-1:] if saptamani_disponibile else []
-            )
-
+            sapt_disp = sorted(df["saptamana"].dropna().unique().tolist())
+            sapt_f = st.multiselect("Săptămâna", options=sapt_disp, default=sapt_disp[-1:] if sapt_disp else [])
         with col2:
-            colegi_disponibili = sorted(df["coleg"].dropna().unique().tolist())
-            coleg_filtru = st.multiselect(
-                "Coleg",
-                options=colegi_disponibili
-            )
-
+            coleg_f = st.multiselect("Coleg", options=sorted(df["coleg"].dropna().unique().tolist()))
         with col3:
-            proiecte_disponibile = sorted(df["proiect"].dropna().unique().tolist())
-            proiect_filtru = st.multiselect(
-                "Proiect",
-                options=proiecte_disponibile
-            )
+            proiect_f = st.multiselect("Proiect", options=sorted(df["proiect"].dropna().unique().tolist()))
 
-        # Aplicare filtre
-        df_filtrat = df.copy()
-        if sapt_filtru:
-            df_filtrat = df_filtrat[df_filtrat["saptamana"].isin(sapt_filtru)]
-        if coleg_filtru:
-            df_filtrat = df_filtrat[df_filtrat["coleg"].isin(coleg_filtru)]
-        if proiect_filtru:
-            df_filtrat = df_filtrat[df_filtrat["proiect"].isin(proiect_filtru)]
+        df_f = df.copy()
+        if sapt_f: df_f = df_f[df_f["saptamana"].isin(sapt_f)]
+        if coleg_f: df_f = df_f[df_f["coleg"].isin(coleg_f)]
+        if proiect_f: df_f = df_f[df_f["proiect"].isin(proiect_f)]
 
         st.markdown("---")
-
-        # Metrici sumar
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total ore", f"{df_filtrat['ore'].sum():.0f}h")
-        m2.metric("Colegi activi", df_filtrat["coleg"].nunique())
-        m3.metric("Proiecte active", df_filtrat["proiect"].nunique())
-        m4.metric("Înregistrări", len(df_filtrat))
-
+        m1.metric("Total ore", f"{df_f['ore'].sum():.0f}h")
+        m2.metric("Colegi activi", df_f["coleg"].nunique())
+        m3.metric("Proiecte active", df_f["proiect"].nunique())
+        m4.metric("Înregistrări", len(df_f))
         st.markdown("---")
 
-        tab1, tab2, tab3 = st.tabs(["Per coleg", "Per proiect", "Per fază"])
-
-        with tab1:
-            ore_coleg = df_filtrat.groupby("coleg")["ore"].sum().sort_values(ascending=False).reset_index()
-            ore_coleg.columns = ["Coleg", "Ore"]
-            ore_coleg["Ore"] = ore_coleg["Ore"].round(1)
-            st.dataframe(ore_coleg, use_container_width=True, hide_index=True)
-
-        with tab2:
-            ore_proiect = df_filtrat.groupby("proiect")["ore"].sum().sort_values(ascending=False).reset_index()
-            ore_proiect.columns = ["Proiect", "Ore"]
-            ore_proiect["Ore"] = ore_proiect["Ore"].round(1)
-            total = ore_proiect["Ore"].sum()
-            ore_proiect["Procent"] = (ore_proiect["Ore"] / total * 100).round(1).astype(str) + "%"
-            st.dataframe(ore_proiect, use_container_width=True, hide_index=True)
-
-        with tab3:
-            ore_faza = df_filtrat.groupby("faza")["ore"].sum().sort_values(ascending=False).reset_index()
-            ore_faza.columns = ["Faza", "Ore"]
-            ore_faza["Ore"] = ore_faza["Ore"].round(1)
-            st.dataframe(ore_faza, use_container_width=True, hide_index=True)
+        t1, t2, t3 = st.tabs(["Per coleg", "Per proiect", "Per fază"])
+        with t1:
+            r = df_f.groupby("coleg")["ore"].sum().sort_values(ascending=False).reset_index()
+            r.columns = ["Coleg","Ore"]; r["Ore"] = r["Ore"].round(1)
+            st.dataframe(r, use_container_width=True, hide_index=True)
+        with t2:
+            r = df_f.groupby("proiect")["ore"].sum().sort_values(ascending=False).reset_index()
+            r.columns = ["Proiect","Ore"]; r["Ore"] = r["Ore"].round(1)
+            total = r["Ore"].sum()
+            r["Procent"] = (r["Ore"] / total * 100).round(1).astype(str) + "%"
+            st.dataframe(r, use_container_width=True, hide_index=True)
+        with t3:
+            r = df_f.groupby("faza")["ore"].sum().sort_values(ascending=False).reset_index()
+            r.columns = ["Faza","Ore"]; r["Ore"] = r["Ore"].round(1)
+            st.dataframe(r, use_container_width=True, hide_index=True)
 
         st.markdown("---")
+        csv = df_f.to_csv(index=False, encoding="utf-8")
+        st.download_button("⬇️ Descarcă CSV", data=csv,
+            file_name=f"pontaj_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv", use_container_width=True)
 
-        # Export
-        col_exp1, col_exp2 = st.columns(2)
-        with col_exp1:
-            csv = df_filtrat.to_csv(index=False, encoding="utf-8")
-            st.download_button(
-                "⬇️ Descarcă CSV",
-                data=csv,
-                file_name=f"pontaj_export_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-
-# ============================================================
-# PAGINA 3 — ADMINISTRARE
-# ============================================================
 elif pagina == "⚙️ Administrare":
     st.title("⚙️ Administrare liste")
-    st.markdown("Modifică listele de proiecte, colegi, faze și subfaze.")
-
-    # Parola simpla de protectie
     parola = st.text_input("🔒 Parolă admin", type="password")
     if parola != "allied2026":
-        if parola:
-            st.error("Parolă incorectă.")
+        if parola: st.error("Parolă incorectă.")
         st.info("Introdu parola pentru a accesa administrarea.")
         st.stop()
 
     st.success("✅ Acces acordat.")
     st.markdown("---")
-
     tab_p, tab_c, tab_f, tab_sf = st.tabs(["Proiecte", "Colegi", "Faze", "Subfaze"])
 
     def editor_lista(tab, cheie, titlu):
         with tab:
             st.subheader(titlu)
-            lista_curenta = "\n".join(config[cheie])
-            lista_noua = st.text_area(
-                "Un element pe linie:",
-                value=lista_curenta,
-                height=400,
-                key=f"editor_{cheie}"
-            )
-            if st.button(f"💾 Salvează {titlu}", key=f"save_{cheie}"):
+            lista_noua = st.text_area("Un element pe linie:", value="\n".join(config[cheie]), height=400, key=f"ed_{cheie}")
+            if st.button(f"💾 Salvează {titlu}", key=f"sv_{cheie}"):
                 elemente = [x.strip() for x in lista_noua.split("\n") if x.strip()]
                 config[cheie] = elemente
-                salveaza_config(config)
-                st.success(f"✅ {titlu} actualizate! ({len(elemente)} elemente)")
-                st.rerun()
+                with st.spinner("Se salvează..."):
+                    ok = salveaza_config(config)
+                if ok:
+                    st.success(f"✅ {titlu} actualizate! ({len(elemente)} elemente)")
+                    incarca_config.clear()
+                    st.rerun()
 
     editor_lista(tab_p, "proiecte", "Proiecte")
     editor_lista(tab_c, "colegi", "Colegi")
@@ -474,16 +392,9 @@ elif pagina == "⚙️ Administrare":
 
     st.markdown("---")
     st.subheader("🗃️ Date pontaj")
-
     df = incarca_pontaj()
     if len(df) > 0:
-        st.write(f"Total înregistrări salvate: **{len(df)}**")
+        st.write(f"Total înregistrări: **{len(df)}**")
         st.dataframe(df.tail(20), use_container_width=True)
-
-        # Sterge ultima inregistrare
-        if st.button("🗑️ Șterge ultima înregistrare", type="secondary"):
-            sterge_inregistrare(df.index[-1])
-            st.success("Ultima înregistrare ștearsă.")
-            st.rerun()
     else:
         st.info("Nu există date salvate încă.")
