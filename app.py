@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
 from supabase import create_client
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Pontaj Allied Engineers", page_icon="🏗️", layout="wide")
 
@@ -128,6 +132,181 @@ def incarca_config():
 def salveaza_config(config):
     st.session_state["pontaj_config_v1"] = config
     return True
+
+# ============================================================
+# EXPORT GOOGLE SHEETS (XLSX)
+# ============================================================
+def genereaza_xlsx(df_export, titlu="Pontaj Allied Engineers"):
+    wb = Workbook()
+
+    # ---- Sheet 1: Date complete ----
+    ws1 = wb.active
+    ws1.title = "Date Pontaj"
+
+    # Culori
+    culoare_header = "1F4E79"      # albastru inchis
+    culoare_header2 = "2E75B6"     # albastru mediu
+    culoare_rand_par = "DEEAF1"    # albastru foarte deschis
+    culoare_total = "FCE4D6"       # portocaliu deschis pentru totaluri
+
+    thin = Side(style='thin', color="AAAAAA")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    # Titlu
+    ws1.merge_cells("A1:I1")
+    ws1["A1"] = titlu
+    ws1["A1"].font = Font(name="Arial", bold=True, size=14, color="FFFFFF")
+    ws1["A1"].fill = PatternFill("solid", start_color=culoare_header)
+    ws1["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws1.row_dimensions[1].height = 28
+
+    # Subtitlu data export
+    ws1.merge_cells("A2:I2")
+    ws1["A2"] = f"Export generat: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    ws1["A2"].font = Font(name="Arial", italic=True, size=10, color="595959")
+    ws1["A2"].alignment = Alignment(horizontal="center")
+    ws1.row_dimensions[2].height = 18
+
+    # Rand gol
+    ws1.row_dimensions[3].height = 8
+
+    # Coloane de afisat
+    coloane = ["data_zi", "saptamana", "coleg", "proiect", "faza", "subfaza", "ore", "comentarii", "timestamp"]
+    headere = ["Data", "Săptămâna", "Coleg", "Proiect", "Faza", "Subfaza", "Ore", "Comentarii", "Înregistrat la"]
+
+    # Header tabel
+    for col_idx, header in enumerate(headere, 1):
+        cell = ws1.cell(row=4, column=col_idx, value=header)
+        cell.font = Font(name="Arial", bold=True, size=11, color="FFFFFF")
+        cell.fill = PatternFill("solid", start_color=culoare_header2)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+    ws1.row_dimensions[4].height = 22
+
+    # Date
+    df_clean = df_export.copy()
+    for col in coloane:
+        if col not in df_clean.columns:
+            df_clean[col] = ""
+
+    for row_idx, row in enumerate(df_clean[coloane].itertuples(index=False), 5):
+        fill_color = culoare_rand_par if row_idx % 2 == 0 else "FFFFFF"
+        for col_idx, val in enumerate(row, 1):
+            cell = ws1.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = Font(name="Arial", size=10)
+            cell.fill = PatternFill("solid", start_color=fill_color)
+            cell.border = border
+            cell.alignment = Alignment(vertical="center")
+            if col_idx == 7:  # Ore - centrat
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Rand TOTAL
+    total_row = len(df_clean) + 5
+    ws1.cell(row=total_row, column=6, value="TOTAL ORE:").font = Font(name="Arial", bold=True, size=11)
+    ws1.cell(row=total_row, column=6).alignment = Alignment(horizontal="right")
+    total_formula = f"=SUM(G5:G{total_row - 1})"
+    total_cell = ws1.cell(row=total_row, column=7, value=total_formula)
+    total_cell.font = Font(name="Arial", bold=True, size=12, color="C00000")
+    total_cell.fill = PatternFill("solid", start_color=culoare_total)
+    total_cell.alignment = Alignment(horizontal="center", vertical="center")
+    total_cell.border = border
+    ws1.row_dimensions[total_row].height = 22
+
+    # Latimi coloane
+    latimi = [12, 14, 30, 22, 22, 22, 8, 30, 18]
+    for i, latime in enumerate(latimi, 1):
+        ws1.column_dimensions[get_column_letter(i)].width = latime
+
+    # ---- Sheet 2: Rezumat pe colegi ----
+    ws2 = wb.create_sheet("Rezumat Colegi")
+    ws2["A1"] = "Rezumat ore per coleg"
+    ws2["A1"].font = Font(name="Arial", bold=True, size=13, color="FFFFFF")
+    ws2["A1"].fill = PatternFill("solid", start_color=culoare_header)
+    ws2.merge_cells("A1:C1")
+    ws2["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws2.row_dimensions[1].height = 26
+
+    for col_idx, h in enumerate(["Coleg", "Total Ore", "Nr. Înregistrări"], 1):
+        cell = ws2.cell(row=2, column=col_idx, value=h)
+        cell.font = Font(name="Arial", bold=True, size=11, color="FFFFFF")
+        cell.fill = PatternFill("solid", start_color=culoare_header2)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    if "coleg" in df_clean.columns and "ore" in df_clean.columns:
+        df_clean["ore"] = pd.to_numeric(df_clean["ore"], errors="coerce")
+        rezumat_colegi = df_clean.groupby("coleg").agg(
+            total_ore=("ore", "sum"),
+            nr_inreg=("ore", "count")
+        ).sort_values("total_ore", ascending=False).reset_index()
+
+        for row_idx, row in rezumat_colegi.iterrows():
+            fill_color = culoare_rand_par if row_idx % 2 == 0 else "FFFFFF"
+            ws2.cell(row=row_idx+3, column=1, value=row["coleg"]).font = Font(name="Arial", size=10)
+            ws2.cell(row=row_idx+3, column=1).fill = PatternFill("solid", start_color=fill_color)
+            ws2.cell(row=row_idx+3, column=1).border = border
+            ore_cell = ws2.cell(row=row_idx+3, column=2, value=round(row["total_ore"], 1))
+            ore_cell.font = Font(name="Arial", size=10)
+            ore_cell.fill = PatternFill("solid", start_color=fill_color)
+            ore_cell.alignment = Alignment(horizontal="center")
+            ore_cell.border = border
+            nr_cell = ws2.cell(row=row_idx+3, column=3, value=int(row["nr_inreg"]))
+            nr_cell.font = Font(name="Arial", size=10)
+            nr_cell.fill = PatternFill("solid", start_color=fill_color)
+            nr_cell.alignment = Alignment(horizontal="center")
+            nr_cell.border = border
+
+    ws2.column_dimensions["A"].width = 32
+    ws2.column_dimensions["B"].width = 14
+    ws2.column_dimensions["C"].width = 18
+
+    # ---- Sheet 3: Rezumat pe proiecte ----
+    ws3 = wb.create_sheet("Rezumat Proiecte")
+    ws3["A1"] = "Rezumat ore per proiect"
+    ws3["A1"].font = Font(name="Arial", bold=True, size=13, color="FFFFFF")
+    ws3["A1"].fill = PatternFill("solid", start_color=culoare_header)
+    ws3.merge_cells("A1:C1")
+    ws3["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws3.row_dimensions[1].height = 26
+
+    for col_idx, h in enumerate(["Proiect", "Total Ore", "% din Total"], 1):
+        cell = ws3.cell(row=2, column=col_idx, value=h)
+        cell.font = Font(name="Arial", bold=True, size=11, color="FFFFFF")
+        cell.fill = PatternFill("solid", start_color=culoare_header2)
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+
+    if "proiect" in df_clean.columns and "ore" in df_clean.columns:
+        df_clean["ore"] = pd.to_numeric(df_clean["ore"], errors="coerce")
+        rezumat_proiecte = df_clean.groupby("proiect")["ore"].sum().sort_values(ascending=False).reset_index()
+        total_ore = rezumat_proiecte["ore"].sum()
+
+        for row_idx, row in rezumat_proiecte.iterrows():
+            fill_color = culoare_rand_par if row_idx % 2 == 0 else "FFFFFF"
+            ws3.cell(row=row_idx+3, column=1, value=row["proiect"]).font = Font(name="Arial", size=10)
+            ws3.cell(row=row_idx+3, column=1).fill = PatternFill("solid", start_color=fill_color)
+            ws3.cell(row=row_idx+3, column=1).border = border
+            ore_cell = ws3.cell(row=row_idx+3, column=2, value=round(row["ore"], 1))
+            ore_cell.font = Font(name="Arial", size=10)
+            ore_cell.fill = PatternFill("solid", start_color=fill_color)
+            ore_cell.alignment = Alignment(horizontal="center")
+            ore_cell.border = border
+            pct = round(row["ore"] / total_ore * 100, 1) if total_ore > 0 else 0
+            pct_cell = ws3.cell(row=row_idx+3, column=3, value=f"{pct}%")
+            pct_cell.font = Font(name="Arial", size=10)
+            pct_cell.fill = PatternFill("solid", start_color=fill_color)
+            pct_cell.alignment = Alignment(horizontal="center")
+            pct_cell.border = border
+
+    ws3.column_dimensions["A"].width = 28
+    ws3.column_dimensions["B"].width = 14
+    ws3.column_dimensions["C"].width = 14
+
+    # Salveaza in memorie
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output
 
 # ============================================================
 # UTILITARE
@@ -302,10 +481,22 @@ elif pagina == "📊 Rapoarte":
             st.dataframe(r, use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        csv = df_f.to_csv(index=False, encoding="utf-8")
-        st.download_button("⬇️ Descarcă CSV", data=csv,
-            file_name=f"pontaj_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv", use_container_width=True)
+        st.markdown("### 📥 Export pentru Google Sheets")
+        col_exp1, col_exp2 = st.columns(2)
+
+        with col_exp1:
+            xlsx_data = genereaza_xlsx(df_f, "Pontaj Allied Engineers")
+            st.download_button(
+                label="📊 Descarcă Excel / Google Sheets",
+                data=xlsx_data,
+                file_name=f"pontaj_allied_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                help="Descarcă fișier .xlsx cu 3 foi: date complete, rezumat colegi, rezumat proiecte"
+            )
+
+        with col_exp2:
+            st.info("💡 **Cum încarci în Google Sheets:**\n1. Descarcă fișierul\n2. Mergi pe sheets.google.com\n3. Fișier → Importă → alegi fișierul\n4. Gata!")
 
 # ============================================================
 # PAGINA 3 - ADMINISTRARE
@@ -339,14 +530,26 @@ elif pagina == "⚙️ Administrare":
     editor(t4, "subfaze", "Subfaze")
 
     st.markdown("---")
-    st.subheader("🗃️ Export date")
+    st.subheader("🗃️ Export complet date")
     df = incarca_pontaj()
     if len(df) > 0:
         st.write(f"Total înregistrări: **{len(df)}**")
         st.dataframe(df, use_container_width=True)
-        csv = df.to_csv(index=False, encoding="utf-8")
-        st.download_button("⬇️ Descarcă toate datele CSV", data=csv,
-            file_name=f"pontaj_complet_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv", use_container_width=True)
+
+        st.markdown("### 📥 Export pentru Google Sheets")
+        col_exp1, col_exp2 = st.columns(2)
+
+        with col_exp1:
+            xlsx_data = genereaza_xlsx(df, "Pontaj Allied Engineers — COMPLET")
+            st.download_button(
+                label="📊 Descarcă TOATE datele — Excel / Google Sheets",
+                data=xlsx_data,
+                file_name=f"pontaj_complet_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+
+        with col_exp2:
+            st.info("💡 **Cum încarci în Google Sheets:**\n1. Descarcă fișierul\n2. Mergi pe sheets.google.com\n3. Fișier → Importă → alegi fișierul\n4. Gata!")
     else:
         st.info("Nu există date salvate încă.")
